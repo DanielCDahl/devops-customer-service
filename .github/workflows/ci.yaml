@@ -1,46 +1,79 @@
-name: ci with integration tests
+name: CI/CD
 
 on:
   push:
     branches:
-      - master
+      - main
 
 jobs:
-  build:
-
+  test:
+    name: Run tests
     runs-on: ubuntu-latest
 
     services:
       mysql:
         image: mysql:8
         env:
-          MYSQL_ROOT_PASSWORD: root
-          MYSQL_DB: customer_db
-
+          MYSQL_ROOT_PASSWORD: ci_password
+          MYSQL_DATABASE: test_db
         ports:
           - 3306:3306
-        options:
-          --health-cmd="mysqladmin ping -h localhost -uroot -proot"
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -pci_password"
           --health-interval=10s
           --health-timeout=5s
           --health-retries=10
 
+    env:
+      DB_URL: jdbc:mysql://127.0.0.1:3306/test_db
+      DB_USERNAME: root
+      DB_PASSWORD: ci_password
+      JWT_SECRET: ${{ secrets.CI_JWT_SECRET }}
+      BOOKING_SERVICE_URL: http://localhost:8083
+      CUSTOMER_SERVICE_BASE_URL: http://localhost:8081
+
     steps:
-      - name: Check out Code
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
-      - name: Set up java
-        uses: actions/setup-java@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
         with:
+          distribution: temurin
           java-version: "17"
-          distribution: "temurin"
-          cache: "maven"
+          cache: maven
 
-      - name: Build and run tests
-        run: mvn -B package
+      - name: Run tests
+        run: mvn -B test
 
+  build-and-deploy:
+    name: Build, push and deploy
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:${{ github.sha }}
+
+      - name: Deploy to Railway
+        run: npx -y @railway/cli@latest redeploy --service "${{ github.event.repository.name }}" --yes
         env:
-          SPRING_DATASOURCE_URL: jdbc:mysql://localhost:3306/customer_db_test
-          SPRING_DATASOURCE_USERNAME: root
-          SPRING_DATASOURCE_PASSWORD: root
-          JWT_SECRET: 5367566859703373367639792F423F452848284D6251655468576D5A71347437
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
